@@ -6,6 +6,10 @@ import pyttsx3
 import sqlite3
 from datetime import datetime
 import threading
+import os
+import platform
+import subprocess
+from fpdf import FPDF
 
 # Set modern appearance
 ctk.set_appearance_mode("Light") 
@@ -190,13 +194,20 @@ class NexusPro:
     def calc_click(self, char):
         curr = self.calc_disp.get()
         if curr == "Error": curr = ""
-        self.calc_disp.delete(0, tk.END); self.calc_disp.insert(0, str(curr) + str(char))
-    def calc_clear(self): self.calc_disp.delete(0, tk.END)
+        self.calc_disp.delete(0, tk.END)
+        self.calc_disp.insert(0, str(curr) + str(char))
+        
+    def calc_clear(self): 
+        self.calc_disp.delete(0, tk.END)
+        
     def calc_eval(self):
         try:
             res = eval(self.calc_disp.get())
-            self.calc_disp.delete(0, tk.END); self.calc_disp.insert(0, f"{res:.2f}" if isinstance(res, float) else str(res))
-        except: self.calc_disp.delete(0, tk.END); self.calc_disp.insert(0, "Error")
+            self.calc_disp.delete(0, tk.END)
+            self.calc_disp.insert(0, f"{res:.2f}" if isinstance(res, float) else str(res))
+        except: 
+            self.calc_disp.delete(0, tk.END)
+            self.calc_disp.insert(0, "Error")
 
     # --- BILLING LOGIC ---
     def process_cart_entry(self, name, qty, rate):
@@ -213,7 +224,8 @@ class NexusPro:
             
             self.lbl_total.configure(text=f"GRAND TOTAL: ${sum(i['total'] for i in self.cart):.2f}")
             self.speak(f"Added {name}")
-        except: messagebox.showerror("Error", "Invalid Numeric Data")
+        except: 
+            messagebox.showerror("Error", "Invalid Numeric Data")
 
     def add_or_update_bill_manual(self):
         n, q, r = self.b_item.get(), self.b_qty.get(), self.b_rate.get()
@@ -225,8 +237,10 @@ class NexusPro:
                     self.cart[self.editing_item_idx].update({"name": n, "qty": q_int, "rate": r_flt, "total": tot})
                     self.bill_tree.item(self.editing_row_id, values=(n.capitalize(), q_int, f"${r_flt:.2f}", f"${tot:.2f}", "✏️", "🗑️"))
                     self.lbl_total.configure(text=f"GRAND TOTAL: ${sum(i['total'] for i in self.cart):.2f}")
-                    self.editing_row_id = None; self.btn_manual.configure(text="➕ Add", fg_color="#0a3d62")
-                except: messagebox.showerror("Error", "Invalid update format")
+                    self.editing_row_id = None
+                    self.btn_manual.configure(text="➕ Add", fg_color="#0a3d62")
+                except: 
+                    messagebox.showerror("Error", "Invalid update format")
             else:
                 self.process_cart_entry(n, q, r)
             self.b_item.delete(0, 'end'); self.b_qty.delete(0, 'end'); self.b_rate.delete(0, 'end'); self.b_item.focus_set()
@@ -250,14 +264,87 @@ class NexusPro:
                 del self.cart[idx]; self.bill_tree.delete(row)
                 self.lbl_total.configure(text=f"GRAND TOTAL: ${sum(i['total'] for i in self.cart):.2f}")
 
+    # --- CHECKOUT & PDF LOGIC ---
     def checkout(self):
         if not self.cart: return
         dt = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        # Generate PDF Receipt Before Clearing Cart
+        try:
+            self.generate_receipt_pdf(dt)
+        except Exception as e:
+            messagebox.showerror("PDF Error", f"Failed to generate PDF: {e}")
+
         for i in self.cart:
             self.cur.execute("INSERT INTO sales (customer, item, qty, total, profit, date) VALUES (?,?,?,?,?,?)",
                              (self.session_customer['name'], i['name'], i['qty'], i['total'], i.get('profit', 0), dt))
-        self.conn.commit(); self.cart = []; self.ui_billing()
-        self.update_voice_banner("✅ Checkout Successful!", "#2ecc71")
+        self.conn.commit()
+        self.cart = []
+        self.ui_billing()
+        self.update_voice_banner("✅ Checkout & PDF Generated!", "#2ecc71")
+
+    def generate_receipt_pdf(self, dt):
+        pdf = FPDF()
+        pdf.add_page()
+        
+        # Header text
+        pdf.set_font("Arial", 'B', 22)
+        pdf.cell(0, 10, "Rajendra Gruh Vastu Bhandar", ln=True, align='C')
+        
+        # Sub-header
+        pdf.set_font("Arial", 'I', 14)
+        pdf.cell(0, 10, "Payment Receipt", ln=True, align='C')
+        
+        # Draw horizontal line divider
+        pdf.line(10, 32, 200, 32)
+        pdf.ln(15)
+        
+        # Meta Details (Date & Customer Info)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(100, 8, f"Date: {dt}", align='L')
+        pdf.cell(90, 8, f"Customer: {self.session_customer['name']}", ln=True, align='L')
+        
+        pdf.cell(100, 8, "", align='L')
+        pdf.cell(90, 8, f"Phone: {self.session_customer['phone']}", ln=True, align='L')
+        pdf.ln(10)
+        
+        # Table Headers
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(80, 10, "Item Name", border=1)
+        pdf.cell(30, 10, "Qty", border=1, align='C')
+        pdf.cell(40, 10, "Rate", border=1, align='C')
+        pdf.cell(40, 10, "Total", border=1, align='C')
+        pdf.ln()
+        
+        # Table Rows (Dynamic Cart Data)
+        pdf.set_font("Arial", '', 12)
+        grand_total = 0
+        for item in self.cart:
+            pdf.cell(80, 10, item['name'].capitalize(), border=1)
+            pdf.cell(30, 10, str(item['qty']), border=1, align='C')
+            pdf.cell(40, 10, f"${item['rate']:.2f}", border=1, align='C')
+            pdf.cell(40, 10, f"${item['total']:.2f}", border=1, align='C')
+            pdf.ln()
+            grand_total += item['total']
+            
+        pdf.ln(10)
+        
+        # Grand Total Footer
+        pdf.set_font("Arial", 'B', 14)
+        pdf.cell(150, 10, "GRAND TOTAL:", align='R')
+        pdf.cell(40, 10, f"${grand_total:.2f}", align='C')
+        
+        # Save the file uniquely
+        filename = f"Receipt_{self.session_customer['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+        pdf.output(filename)
+        
+        # Automatically open the generated PDF on Windows, Mac, or Linux
+        if platform.system() == 'Darwin':
+            subprocess.call(('open', filename))
+        elif platform.system() == 'Windows':
+            os.startfile(filename)
+        else:
+            subprocess.call(('xdg-open', filename))
 
     # --- VOICE CONTROL (Threaded) ---
     def process_voice(self):
@@ -281,10 +368,14 @@ class NexusPro:
                     rt = words[words.index("rate")+1] if "rate" in words else words[3] if len(words)>3 else "0"
                     self.root.after(0, self.process_cart_entry, itm, q, rt)
                     self.root.after(0, self.update_voice_banner, f"✅ Added: {txt.capitalize()}", "#2ecc71")
-                else: self.root.after(0, self.update_voice_banner, "⚠️ Say 'Add [Item] [Qty] [Rate]'", "#e74c3c")
-            except sr.WaitTimeoutError: self.root.after(0, self.update_voice_banner, "⚠️ Timed out", "#e74c3c")
-            except sr.UnknownValueError: self.root.after(0, self.update_voice_banner, "⚠️ Didn't catch that", "#e74c3c")
-            except Exception as e: print(e)
+                else: 
+                    self.root.after(0, self.update_voice_banner, "⚠️ Say 'Add [Item] [Qty] [Rate]'", "#e74c3c")
+            except sr.WaitTimeoutError: 
+                self.root.after(0, self.update_voice_banner, "⚠️ Timed out", "#e74c3c")
+            except sr.UnknownValueError: 
+                self.root.after(0, self.update_voice_banner, "⚠️ Didn't catch that", "#e74c3c")
+            except Exception as e: 
+                print(e)
             finally:
                 self.root.after(0, self.mic_btn.configure, {"fg_color": "#0a3d62"})
                 self.root.after(3000, self.clear_voice_banner)
@@ -293,9 +384,10 @@ class NexusPro:
         if hasattr(self, 'voice_status_bar') and self.voice_status_bar.winfo_exists():
             self.voice_status_bar.configure(text=txt, fg_color=col)
             
-    def clear_voice_banner(self): self.update_voice_banner("", "transparent")
+    def clear_voice_banner(self): 
+        self.update_voice_banner("", "transparent")
 
-    # --- INVENTORY & OTHERS (Fully Restored & Modernized) ---
+    # --- INVENTORY & OTHERS ---
     def show_reports(self):
         self.clear_content()
         self.set_active_nav("📊 PROFIT & LOSS")
@@ -311,7 +403,6 @@ class NexusPro:
         self.set_active_nav("📦 INVENTORY")
         ctk.CTkLabel(self.content, text="Inventory Bulk Manager", font=("Segoe UI", 24, "bold"), text_color="#0a3d62").pack(pady=20)
 
-        # Wrap standard frame inside CTkFrame for strict padding rules
         form_wrapper = ctk.CTkFrame(self.content, fg_color="white", corner_radius=10)
         form_wrapper.pack(pady=10, padx=30, fill="x")
         
@@ -370,13 +461,11 @@ class NexusPro:
         self.ov = ctk.CTkFrame(self.root, fg_color="#0a3d62")
         self.ov.place(relx=0, rely=0, relwidth=1, relheight=1)
         
-        # Fixed constructor (No padx/pady here)
         card = ctk.CTkFrame(self.ov, fg_color="white", corner_radius=15)
         card.place(relx=0.5, rely=0.5, anchor="center")
         
-        # Inner layout using standard packing
         inner_frame = tk.Frame(card, bg="white")
-        inner_frame.pack(padx=50, pady=50) # Safe to use padding here
+        inner_frame.pack(padx=50, pady=50) 
         
         ctk.CTkLabel(inner_frame, text="👤", font=("Segoe UI", 40), text_color="#0a3d62").pack(pady=(0, 10))
         ctk.CTkLabel(inner_frame, text="LOGIN", font=("Segoe UI", 18, "bold"), text_color="#0a3d62").pack(pady=(0, 20))
@@ -396,7 +485,8 @@ class NexusPro:
         v = [i.get() for i in self.inv_entries]
         if all(v):
             self.cur.execute("INSERT OR REPLACE INTO inventory (name, p_rate, s_rate, stock) VALUES (?,?,?,?)", (v[0].lower(), v[1], v[2], v[3]))
-            self.conn.commit(); self.refresh_inventory()
+            self.conn.commit()
+            self.refresh_inventory()
             for i in self.inv_entries: i.delete(0, 'end')
 
     def save_customer(self):
@@ -404,27 +494,36 @@ class NexusPro:
         if n and p:
             try:
                 self.cur.execute("INSERT INTO customers (name, phone) VALUES (?,?)", (n, p))
-                self.conn.commit(); self.refresh_customers()
-                self.reg_name.delete(0, 'end'); self.reg_phone.delete(0, 'end')
-            except: messagebox.showerror("Duplicate", "Customer phone already exists.")
+                self.conn.commit()
+                self.refresh_customers()
+                self.reg_name.delete(0, 'end')
+                self.reg_phone.delete(0, 'end')
+            except: 
+                messagebox.showerror("Duplicate", "Customer phone already exists.")
 
     def refresh_inventory(self):
         for i in self.inv_tree.get_children(): self.inv_tree.delete(i)
-        self.cur.execute("SELECT * FROM inventory"); [self.inv_tree.insert("", "end", values=r) for r in self.cur.fetchall()]
+        self.cur.execute("SELECT * FROM inventory")
+        [self.inv_tree.insert("", "end", values=r) for r in self.cur.fetchall()]
 
     def refresh_customers(self):
         for i in self.cust_tree.get_children(): self.cust_tree.delete(i)
-        self.cur.execute("SELECT * FROM customers"); [self.cust_tree.insert("", "end", values=r) for r in self.cur.fetchall()]
+        self.cur.execute("SELECT * FROM customers")
+        [self.cust_tree.insert("", "end", values=r) for r in self.cur.fetchall()]
 
     def submit_login(self):
         n = self.oname.get().strip()
         if n:
             self.session_customer = {"name": n, "phone": self.onum.get().strip() or "N/A"}
-            self.ov.destroy(); self.ui_billing()
+            self.ov.destroy()
+            self.ui_billing()
             
     def speak(self, txt):
-        try: self.engine.say(txt); self.engine.runAndWait()
-        except: pass 
+        try: 
+            self.engine.say(txt)
+            self.engine.runAndWait()
+        except: 
+            pass 
 
 if __name__ == "__main__":
     root = ctk.CTk()
